@@ -79,6 +79,7 @@ xclmgmt-y := \
 	../subdev/icap_cntrl.o \
 	../subdev/version_ctrl.o \
 	../subdev/pcie_firewall.o \
+	../subdev/hwmon_sdm.o \
 	$(drv_common-y) \
 	mgmt-core.o \
 	mgmt-cw.o \
@@ -105,7 +106,10 @@ ifeq ($(SYMBOL),1)
 	ccflags-y += -g
 endif
 
-ccflags-$(CONFIG_FPGA) += -DENABLE_FPGA_MGR_SUPPORT
+# We can only rely on CONFIG_FPGA to check whether system has fpga-mgr module support or not.
+# But it is not true in some Kernels where this config is enabled but fpga-mgr module is not available
+# which is causing xclmgmt driver loading to fail. So commenting this as fpga-mgr is not used anywhere.
+# ccflags-$(CONFIG_FPGA) += -DENABLE_FPGA_MGR_SUPPORT
 ccflags-y += $(ccflags-m)
 
 all:

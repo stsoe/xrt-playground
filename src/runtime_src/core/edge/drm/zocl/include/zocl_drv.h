@@ -272,6 +272,8 @@ int get_apt_index_by_addr(struct drm_zocl_dev *zdev, phys_addr_t addr);
 int get_apt_index_by_cu_idx(struct drm_zocl_dev *zdev, int cu_idx);
 void update_cu_idx_in_apt(struct drm_zocl_dev *zdev, int apt_idx, int cu_idx);
 
+int zocl_kds_reset(struct drm_zocl_dev *zdev);
+
 int subdev_create_cu(struct drm_zocl_dev *zdev, struct xrt_cu_info *info);
 void subdev_destroy_cu(struct drm_zocl_dev *zdev);
 /* Sub device driver */
@@ -293,4 +295,8 @@ zocl_cu_submit_xcmd(struct drm_zocl_dev *zdev, int i, struct kds_command *xcmd)
 	return ops->submit(pdev, xcmd);
 }
 
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+extern const struct drm_gem_object_funcs zocl_gem_object_funcs;
 #endif

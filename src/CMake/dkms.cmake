@@ -64,6 +64,7 @@ SET (XRT_DKMS_DRIVER_SRCS
   xocl/xocl_debug.c
   xocl/xocl_test.c
   xocl/xgq_xocl_plat.h
+  xocl/xocl_xgq.c
   xocl/userpf/common.h
   xocl/userpf/xocl_bo.c
   xocl/userpf/xocl_bo.h
@@ -197,7 +198,6 @@ SET (XRT_DKMS_DRIVER_SRCS
   xocl/subdev/qdma.c
   xocl/subdev/qdma4.c
   xocl/subdev/feature_rom.c
-  xocl/subdev/mb_scheduler.c
   xocl/subdev/xvc.c
   xocl/subdev/nifd.c
   xocl/subdev/sysmon.c
@@ -250,6 +250,9 @@ SET (XRT_DKMS_DRIVER_SRCS
   xocl/subdev/command_queue.c
   xocl/subdev/cfg_gpio.c
   xocl/subdev/xgq.c
+  xocl/subdev/hwmon_sdm.c
+  xocl/subdev/ert_ctrl.c
+  xocl/subdev/cu_xgq.c
   xocl/Makefile
   )
 
@@ -262,6 +265,7 @@ SET (XRT_DKMS_DRIVER_INCLUDES
   include/profile_ioctl.h
   include/mailbox_proto.h
   include/flash_xrt_data.h
+  include/xocl_xgq.h
   )
 
 # includes relative to core
@@ -278,6 +282,7 @@ SET (XRT_DKMS_CORE_INCLUDES
   include/xgq_cmd_ert.h
   include/xgq_cmd_vmr.h
   include/xgq_impl.h
+  include/xgq_resp_parser.h
   )
 
 SET (XRT_DKMS_COMMON_XRT_DRV
@@ -287,6 +292,7 @@ SET (XRT_DKMS_COMMON_XRT_DRV
   common/drv/fast_adapter.c
   common/drv/cu_plram.c
   common/drv/xrt_xclbin.c
+  common/drv/xgq_execbuf.c
   )
 
 SET (XRT_DKMS_COMMON_XRT_DRV_INCLUDES
@@ -298,6 +304,8 @@ SET (XRT_DKMS_COMMON_XRT_DRV_INCLUDES
   common/drv/include/xrt_xclbin.h
   common/drv/include/kds_stat.h
   common/drv/include/xrt_ert.h
+  common/drv/include/cu_xgq.h
+  common/drv/include/xgq_execbuf.h
   )
 
 SET (XRT_DKMS_ABS_SRCS)

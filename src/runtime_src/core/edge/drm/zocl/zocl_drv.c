@@ -220,6 +220,7 @@ int get_apt_index_by_cu_idx(struct drm_zocl_dev *zdev, int cu_idx)
 int subdev_create_cu(struct drm_zocl_dev *zdev, struct xrt_cu_info *info)
 {
 	struct platform_device *pldev;
+	struct kernel_info *krnl_info;
 	struct resource res;
 	int ret;
 
@@ -229,12 +230,20 @@ int subdev_create_cu(struct drm_zocl_dev *zdev, struct xrt_cu_info *info)
 		return -ENOMEM;
 	}
 
+	krnl_info = zocl_query_kernel(zdev, info->kname);
+	if(!krnl_info) {
+		DRM_WARN("%s CU has no metadata, using default size",info->kname);
+		info->size = 0x10000;
+	}
+	else {
+		info->size = krnl_info->range;
+	}
 	/* hard code resource
 	 * TODO: maybe we should define resource in a header file
 	 */
 	/* zdev->res_start provides higher 32 bits address */
 	res.start = zdev->res_start + info->addr;
-	res.end = res.start + 0xFFFF;
+	res.end = res.start + info->size - 1;
 	res.flags = IORESOURCE_MEM;
 	res.parent = NULL;
 	ret = platform_device_add_resources(pldev, &res, 1);
@@ -299,7 +308,11 @@ void subdev_destroy_cu(struct drm_zocl_dev *zdev)
 struct drm_gem_object *
 zocl_gem_create_object(struct drm_device *dev, size_t size)
 {
-	return kzalloc(sizeof(struct drm_zocl_bo), GFP_KERNEL);
+	struct drm_zocl_bo *bo = kzalloc(sizeof(struct drm_zocl_bo), GFP_KERNEL);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+	bo->gem_base.funcs = &zocl_gem_object_funcs;
+#endif
+	return (&bo->gem_base);
 }
 
 void zocl_free_bo(struct drm_gem_object *obj)
@@ -567,113 +580,31 @@ static vm_fault_t zocl_bo_fault(struct vm_fault *vmf)
 
 static int zocl_client_open(struct drm_device *dev, struct drm_file *filp)
 {
-	struct sched_client_ctx *fpriv = kzalloc(sizeof(*fpriv), GFP_KERNEL);
-	int ret = 0;
-
-	if (!fpriv)
-		return -ENOMEM;
-
 	if (kds_mode == 1) {
-		kfree(fpriv);
-		ret = zocl_create_client(dev->dev_private, &filp->driver_priv);
+		return zocl_create_client(dev->dev_private, &filp->driver_priv);
 	} else {
-		filp->driver_priv = fpriv;
-		mutex_init(&fpriv->lock);
-		atomic_set(&fpriv->trigger, 0);
-		atomic_set(&fpriv->outstanding_execs, 0);
-		fpriv->abort = false;
-		fpriv->pid = get_pid(task_pid(current));
-		INIT_LIST_HEAD(&fpriv->graph_list);
-		spin_lock_init(&fpriv->graph_list_lock);
-		zocl_track_ctx(dev, fpriv);
-		DRM_INFO("Pid %d opened device\n", pid_nr(task_tgid(current)));
+		return sched_create_client(dev, &filp->driver_priv);
 	}
-
-	return ret;
 }
 
 static void zocl_client_release(struct drm_device *dev, struct drm_file *filp)
 {
-	struct sched_client_ctx *client = filp->driver_priv;
-	struct drm_zocl_dev *zdev = dev->dev_private;
-	int pid;
-	u32 outstanding = 0;
-	int retry = 20;
-	int i;
-
 	if (kds_mode == 1) {
 		zocl_destroy_client(dev->dev_private, &filp->driver_priv);
 		return;
 	}
-
-	if (!client)
+	else {
+		sched_destroy_client(dev, &filp->driver_priv);
 		return;
-
-	pid = pid_nr(client->pid);
-
-	/* force scheduler to abort scheduled cmds for this client */
-	client->abort = true;
-	outstanding = atomic_read(&client->outstanding_execs);
-	while (retry-- && outstanding) {
-		DRM_INFO("pid(%d) waiting for outstanding %d cmds to finish",
-		    pid, outstanding);
-		msleep(500);
-		outstanding = atomic_read(&client->outstanding_execs);
 	}
-	outstanding = atomic_read(&client->outstanding_execs);
-	if (outstanding) {
-		DRM_ERROR("Please investigate stale cmds\n");
-		for (i = 0; i < zdev->exec->num_cus; i++) {
-			zocl_cu_status_print(&zdev->exec->zcu[i]);
-		}
-	}
-
-	/* Release graph context */
-	zocl_aie_graph_free_context_all(zdev, client);
-
-	put_pid(client->pid);
-	client->pid = NULL;
-	if (CLIENT_NUM_CU_CTX(client) == 0)
-		goto done;
-
-	/*
-	 * This happens when application exits without releasing the
-	 * contexts. Give up contexts and release xclbin.
-	 */
-	client->num_cus = 0;
-	(void) zocl_unlock_bitstream(zdev, &uuid_null);
-done:
-	zocl_untrack_ctx(dev, client);
-	kfree(client);
-
-	DRM_INFO("Pid %d closed device\n", pid_nr(task_tgid(current)));
 }
 
 static unsigned int zocl_poll(struct file *filp, poll_table *wait)
 {
-	int counter;
-	struct drm_file *priv = filp->private_data;
-	struct drm_device *dev = priv->minor->dev;
-	struct drm_zocl_dev *zdev = dev->dev_private;
-	struct sched_client_ctx *fpriv = priv->driver_priv;
-	int ret = 0;
-
-	BUG_ON(!fpriv);
-
 	if (kds_mode == 1)
 		return zocl_poll_client(filp, wait);
-
-	poll_wait(filp, &zdev->exec->poll_wait_queue, wait);
-
-	mutex_lock(&fpriv->lock);
-	counter = atomic_read(&fpriv->trigger);
-	if (counter > 0) {
-		atomic_dec(&fpriv->trigger);
-		ret = POLLIN;
-	}
-	mutex_unlock(&fpriv->lock);
-
-	return ret;
+	else
+		return sched_poll_client(filp, wait);
 }
 
 static int zocl_iommu_init(struct drm_zocl_dev *zdev,
@@ -772,22 +703,30 @@ static struct drm_driver zocl_driver = {
 #endif
 	.open                      = zocl_client_open,
 	.postclose                 = zocl_client_release,
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)
-	.gem_free_object_unlocked  = zocl_free_bo,
-#else
-	.gem_free_object           = zocl_free_bo,
-#endif
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
+	#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)
+		.gem_free_object_unlocked  = zocl_free_bo,
+	#else
+		.gem_free_object           = zocl_free_bo,
+	#endif
+
 	.gem_vm_ops                = &zocl_bo_vm_ops,
+	.gem_prime_get_sg_table    = drm_gem_cma_prime_get_sg_table,
+	.gem_prime_vmap            = drm_gem_cma_prime_vmap,
+	.gem_prime_vunmap          = drm_gem_cma_prime_vunmap,
+	.gem_prime_export          = drm_gem_prime_export,
+#endif
+
 	.gem_create_object         = zocl_gem_create_object,
 	.prime_handle_to_fd        = drm_gem_prime_handle_to_fd,
 	.prime_fd_to_handle        = drm_gem_prime_fd_to_handle,
 	.gem_prime_import          = zocl_gem_import,
-	.gem_prime_export          = drm_gem_prime_export,
-	.gem_prime_get_sg_table    = drm_gem_cma_prime_get_sg_table,
 	.gem_prime_import_sg_table = drm_gem_cma_prime_import_sg_table,
-	.gem_prime_vmap            = drm_gem_cma_prime_vmap,
-	.gem_prime_vunmap          = drm_gem_cma_prime_vunmap,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0)
+	.gem_prime_mmap            = drm_gem_prime_mmap,
+#else
 	.gem_prime_mmap            = drm_gem_cma_prime_mmap,
+#endif
 	.ioctls                    = zocl_ioctls,
 	.num_ioctls                = ARRAY_SIZE(zocl_ioctls),
 	.fops                      = &zocl_driver_fops,
@@ -795,6 +734,16 @@ static struct drm_driver zocl_driver = {
 	.desc                      = ZOCL_DRIVER_DESC,
 	.date                      = driver_date,
 };
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+const struct drm_gem_object_funcs zocl_gem_object_funcs = {
+	.free = zocl_free_bo,
+	.vm_ops = &zocl_bo_vm_ops,
+	.get_sg_table = drm_gem_cma_get_sg_table,
+	.vmap = drm_gem_cma_vmap,
+	.export = drm_gem_prime_export,
+};
+#endif
 
 static const struct zdev_data zdev_data_mpsoc = {
 	.fpga_driver_name = "pcap",

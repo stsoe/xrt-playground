@@ -20,8 +20,6 @@
 #include "xrt_xclbin.h"
 #include "xclbin.h"
 
-#define VIRTUAL_CU(id) (id == (u32)-1)
-
 extern int kds_mode;
 
 static int
@@ -357,66 +355,58 @@ zocl_update_apertures(struct drm_zocl_dev *zdev)
 static int
 zocl_create_cu(struct drm_zocl_dev *zdev)
 {
-	struct ip_data *ip;
-	struct xrt_cu_info info;
-	char kname[64];
-	char *kname_p;
 	int err;
 	int i;
+	int num_cus;
+	struct xrt_cu_info *cu_info = NULL;
 
 	if (!zdev->ip)
 		return 0;
 
-	for (i = 0; i < zdev->ip->m_count; ++i) {
-		ip = &zdev->ip->m_ip_data[i];
+	cu_info = kzalloc(MAX_CUS * sizeof(struct xrt_cu_info), GFP_KERNEL);
+	if (!cu_info)
+		return -ENOMEM;
 
-		if (ip->m_type != IP_KERNEL)
-			continue;
+	num_cus = kds_ip_layout2cu_info(zdev->ip, cu_info, MAX_CUS);
+
+	for (i = 0; i < num_cus; ++i) {
 
 		/* Skip streaming kernel */
-		if (ip->m_base_address == -1)
+		if (cu_info[i].addr == -1)
 			continue;
 
-		info.num_res = 1;
-		info.addr = ip->m_base_address;
-		info.intr_enable = xclbin_intr_enable(ip->properties);
-		info.protocol = xclbin_protocol(ip->properties);
-		info.intr_id = xclbin_intr_id(ip->properties);
+		cu_info[i].num_res = 1;
 
-		switch (info.protocol) {
+		switch (cu_info[i].protocol) {
 		case CTRL_HS:
 		case CTRL_CHAIN:
 		case CTRL_NONE:
-			info.model = XCU_HLS;
+			cu_info[i].model = XCU_HLS;
 			break;
 		case CTRL_FA:
-			info.model = XCU_FA;
+			cu_info[i].model = XCU_FA;
 			break;
 		default:
+			kfree(cu_info);
 			return -EINVAL;
 		}
 
-		info.inst_idx = i;
-		/* ip_data->m_name format "<kernel name>:<instance name>",
-		 * where instance name is so called CU name.
-		 */
-		strcpy(kname, ip->m_name);
-		kname_p = &kname[0];
-		strcpy(info.kname, strsep(&kname_p, ":"));
-		strcpy(info.iname, strsep(&kname_p, ":"));
+		cu_info[i].inst_idx = i;
 
 		/* CU sub device is a virtual device, which means there is no
 		 * device tree nodes
 		 */
-		err = subdev_create_cu(zdev, &info);
+		err = subdev_create_cu(zdev, &cu_info[i]);
 		if (err) {
 			DRM_ERROR("cannot create CU subdev");
 			goto err;
 		}
 	}
+	kfree(cu_info);
 
 	return 0;
 err:
+	kfree(cu_info);
 	subdev_destroy_cu(zdev);
 	return err;
 }
@@ -1008,6 +998,7 @@ zocl_xclbin_read_axlf(struct drm_zocl_dev *zdev, struct drm_zocl_axlf *axlf_obj,
 		 */
 		write_unlock(&zdev->attr_rwlock);
 
+		(void) zocl_kds_reset(zdev);
 		ret = zocl_create_cu(zdev);
 		if (ret) {
 			write_lock(&zdev->attr_rwlock);
@@ -1038,8 +1029,8 @@ zocl_xclbin_get_uuid(struct drm_zocl_dev *zdev)
 	return zdev->zdev_xclbin->zx_uuid;
 }
 
-static int
-zocl_xclbin_hold(struct drm_zocl_dev *zdev, const xuid_t *id)
+int
+zocl_xclbin_hold(struct drm_zocl_dev *zdev, const uuid_t *id)
 {
 	xuid_t *xclbin_id = (xuid_t *)zocl_xclbin_get_uuid(zdev);
 
@@ -1079,8 +1070,8 @@ int zocl_lock_bitstream(struct drm_zocl_dev *zdev, const uuid_t *id)
 	return ret;
 }
 
-static int
-zocl_xclbin_release(struct drm_zocl_dev *zdev, const xuid_t *id)
+int
+zocl_xclbin_release(struct drm_zocl_dev *zdev, const uuid_t *id)
 {
 	xuid_t *xclbin_uuid = (xuid_t *)zocl_xclbin_get_uuid(zdev);
 
@@ -1184,135 +1175,6 @@ zocl_aie_free_ctx(struct drm_zocl_dev *zdev, struct drm_zocl_ctx *ctx,
         struct sched_client_ctx *client)
 {
 	return zocl_aie_free_context(zdev, client);
-}
-
-/* TODO: remove this once new KDS is ready */
-int
-zocl_xclbin_ctx(struct drm_zocl_dev *zdev, struct drm_zocl_ctx *ctx,
-	struct sched_client_ctx *client)
-{
-	struct sched_exec_core *exec = zdev->exec;
-	xuid_t *zdev_xuid, *ctx_xuid = NULL;
-	u32 cu_idx = ctx->cu_index;
-	bool shared;
-	int ret = 0;
-
-	BUG_ON(!mutex_is_locked(&zdev->zdev_xclbin_lock));
-
-	ctx_xuid = vmalloc(ctx->uuid_size);
-	if (!ctx_xuid)
-		return -ENOMEM;
-	ret = copy_from_user(ctx_xuid, (void *)(uintptr_t)ctx->uuid_ptr,
-	    ctx->uuid_size);
-	if (ret) {
-		vfree(ctx_xuid);
-		return ret;
-	}
-
-	write_lock(&zdev->attr_rwlock);
-
-	/*
-	 * valid xclbin_id is the same.
-	 * Note: xclbin has been downloaded by read_axlf.
-	 *       user can only open/remove context with same loaded xclbin.
-	 */
-	zdev_xuid = (xuid_t *)zdev->zdev_xclbin->zx_uuid;
-
-	if (!zdev_xuid || !uuid_equal(zdev_xuid, ctx_xuid)) {
-		DRM_ERROR("try to add/remove CTX with wrong xclbin %pUB",
-		    ctx_xuid);
-		ret = -EBUSY;
-		goto out;
-	}
-
-	/* validate cu_idx */
-	if (!VIRTUAL_CU(cu_idx) && cu_idx >= zdev->ip->m_count) {
-		DRM_ERROR("CU Index(%u) >= numcus(%d)\n",
-		    cu_idx, zdev->ip->m_count);
-		ret = -EINVAL;
-		goto out;
-	}
-
-	/* validate cu */
-	if (!VIRTUAL_CU(cu_idx) && !zocl_exec_valid_cu(exec, cu_idx)) {
-		DRM_ERROR("invalid CU(%d)", cu_idx);
-		ret = -EINVAL;
-		goto out;
-	}
-
-	/*
-	 * handle remove or add
-	 * each client ctx can lock bitstream once, multiple ctx will
-	 * lock bitstream n times. clien is responsible releasing the refcnt
-	 */
-	if (ctx->op == ZOCL_CTX_OP_FREE_CTX) {
-		if (zocl_xclbin_refcount(zdev) == 0) {
-			DRM_ERROR("can not remove unused xclbin");
-			ret = -EINVAL;
-			goto out;
-		}
-
-		if (cu_idx != ZOCL_CTX_VIRT_CU_INDEX) {
-			/* Try clear exclusive CU */
-			ret = test_and_clear_bit(cu_idx, client->excus);
-			if (!ret) {
-				/* Maybe it is shared CU */
-				ret = test_and_clear_bit(cu_idx, client->shcus);
-			}
-			if (!ret) {
-				DRM_ERROR("can not remove unreserved cu");
-        			ret = -EINVAL;
-				goto out;
-			}
-		}
-
-		/* revert the meaning of return value. 0 means succesfull */
-		ret = 0;
-
-		--client->num_cus;
-		if (CLIENT_NUM_CU_CTX(client) == 0)
-			ret = zocl_xclbin_release(zdev, ctx_xuid);
-		goto out;
-	}
-
-	if (ctx->op != ZOCL_CTX_OP_ALLOC_CTX) {
-		ret = -EINVAL;
-		goto out;
-	}
-
-	if (cu_idx != ZOCL_CTX_VIRT_CU_INDEX) {
-		shared = (ctx->flags == ZOCL_CTX_SHARED);
-
-		if (!shared)
-			ret = test_and_set_bit(cu_idx, client->excus);
-		else {
-			ret = test_bit(cu_idx, client->excus);
-			if (ret) {
-				DRM_ERROR("cannot share exclusived CU");
-				ret = -EINVAL;
-				goto out;
-			}
-			ret = test_and_set_bit(cu_idx, client->shcus);
-		}
-
-		if (ret) {
-			DRM_ERROR("CTX already added by this process");
-			ret = -EINVAL;
-			goto out;
-		}
-	}
-
-	/* Hold XCLBIN the first time alloc context */
-	if (CLIENT_NUM_CU_CTX(client) == 0) {
-		ret = zocl_xclbin_hold(zdev, zdev_xuid);
-		if (ret)
-			goto out;
-	}
-	++client->num_cus;
-out:
-	write_unlock(&zdev->attr_rwlock);
-	vfree(ctx_xuid);
-	return ret;
 }
 
 int

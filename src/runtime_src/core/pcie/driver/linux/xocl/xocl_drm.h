@@ -64,6 +64,8 @@ struct xocl_drm {
 	struct drm_mm           *mm;
 	struct mutex            mm_lock;
 	struct drm_xocl_mm_stat **mm_usage_stat;
+	/* Array of bo usage stats */
+	struct drm_xocl_mm_stat *bo_usage_stat;
 
 	int			cma_bank_idx;
 
@@ -159,7 +161,7 @@ int xocl_init_unmgd(struct drm_xocl_unmgd *unmgd, uint64_t data_ptr,
 		        uint64_t size, u32 write);
 void xocl_finish_unmgd(struct drm_xocl_unmgd *unmgd);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0) || defined(RHEL_8_5_GE)
 extern const struct drm_gem_object_funcs xocl_gem_object_funcs;
 #endif
 

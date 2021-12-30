@@ -629,9 +629,21 @@ static int xclmgmt_icap_get_data_impl(struct xclmgmt_dev *lro, void *buf)
 static void xclmgmt_clock_get_data_impl(struct xclmgmt_dev *lro, void *buf)
 {
 	struct xcl_pr_region *hwicap = NULL;
+	int ret = 0;
 
 	hwicap = (struct xcl_pr_region *)buf;
-	hwicap->freq_0 = xocl_clock_get_data(lro, CLOCK_FREQ_0);
+	ret = xocl_clock_get_data(lro, CLOCK_FREQ_0);
+	if (ret == -ENODEV) {
+		hwicap->freq_0 = xocl_xgq_clock_get_data(lro, CLOCK_FREQ_0);
+		hwicap->freq_1 = xocl_xgq_clock_get_data(lro, CLOCK_FREQ_1);
+		hwicap->freq_2 = xocl_xgq_clock_get_data(lro, CLOCK_FREQ_2);
+		hwicap->freq_cntr_0 = xocl_xgq_clock_get_data(lro, FREQ_COUNTER_0);
+		hwicap->freq_cntr_1 = xocl_xgq_clock_get_data(lro, FREQ_COUNTER_1);
+		hwicap->freq_cntr_2 = xocl_xgq_clock_get_data(lro, FREQ_COUNTER_2);
+		return;
+	}
+
+	hwicap->freq_0 = ret;
 	hwicap->freq_1 = xocl_clock_get_data(lro, CLOCK_FREQ_1);
 	hwicap->freq_2 = xocl_clock_get_data(lro, CLOCK_FREQ_2);
 	hwicap->freq_cntr_0 = xocl_clock_get_data(lro, FREQ_COUNTER_0);
@@ -1370,7 +1382,7 @@ static int xclmgmt_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	(void) xocl_subdev_create_by_level(lro, XOCL_SUBDEV_LEVEL_BLD);
 	(void) xocl_subdev_create_vsec_devs(lro);
 
-	xocl_pmc_enable_reset(lro);
+	(void) xocl_reinit_vmr(lro);
 
 	/*
 	 * For u30 whose reset relies on SC, and the cmc is running on ps, we
@@ -1385,6 +1397,8 @@ static int xclmgmt_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	 */
 	if (!xocl_ps_wait(lro))
 		xocl_xmc_get_serial_num(lro);
+
+	(void) xocl_hwmon_sdm_get_sensors_list(lro);
 
 	xocl_drvinst_set_offline(lro, false);
 	return 0;
@@ -1535,6 +1549,7 @@ static int (*drv_reg_funcs[])(void) __initdata = {
 	xocl_init_icap_controller,
 	xocl_init_pcie_firewall,
 	xocl_init_xgq,
+	xocl_init_hwmon_sdm,
 };
 
 static void (*drv_unreg_funcs[])(void) = {
@@ -1570,6 +1585,7 @@ static void (*drv_unreg_funcs[])(void) = {
 	xocl_fini_icap_controller,
 	xocl_fini_pcie_firewall,
 	xocl_fini_xgq,
+	xocl_fini_hwmon_sdm,
 };
 
 static int __init xclmgmt_init(void)

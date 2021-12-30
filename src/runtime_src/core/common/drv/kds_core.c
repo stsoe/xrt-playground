@@ -22,16 +22,12 @@
 
 /* for sysfs */
 int store_kds_echo(struct kds_sched *kds, const char *buf, size_t count,
-		   int kds_mode, u32 clients, int *echo)
+		   int *echo)
 {
 	u32 enable;
 	u32 live_clients;
 
-	if (kds)
-		live_clients = kds_live_clients(kds, NULL);
-	else
-		live_clients = clients;
-
+	live_clients = kds_live_clients(kds, NULL);
 	/* Ideally, KDS should be locked to reject new client.
 	 * But, this node is hidden for internal test purpose.
 	 * Let's refine it after new KDS is the default and
@@ -91,10 +87,14 @@ ssize_t show_kds_scustat_raw(struct kds_sched *kds, char *buf)
 	 * So, this separate kds_scustat_raw is better.
 	 *
 	 * But in the worst case, this is still not good enough.
+	 *
+	 * Soft kernels are namespaced with a domain identifer that
+	 * is or'ed into the scu index.	 For soft kernels the 
+	 * domain is SCU_DOMAIN.
 	 */
 	mutex_lock(&scu_mgmt->lock);
 	for (i = 0; i < scu_mgmt->num_cus; ++i) {
-		sz += scnprintf(buf+sz, PAGE_SIZE - sz, cu_fmt, i,
+		sz += scnprintf(buf+sz, PAGE_SIZE - sz, cu_fmt, (i | SCU_DOMAIN),
 				scu_mgmt->name[i], scu_mgmt->status[i],
 				cu_stat_read(scu_mgmt,usage[i]));
 	}
@@ -132,6 +132,59 @@ ssize_t show_kds_stat(struct kds_sched *kds, char *buf)
 	return sz;
 }
 /* sysfs end */
+
+static int
+kds_wake_up_poll(struct kds_sched *kds)
+{
+	if (kds->polling_start) {
+		kds->polling_start = 0;
+		return 1;
+	}
+
+	if (kds->polling_stop)
+		return 1;
+
+	return 0;
+}
+
+static int kds_polling_thread(void *data)
+{
+	struct kds_sched *kds = (struct kds_sched *)data;
+	struct kds_cu_mgmt *cu_mgmt = &kds->cu_mgmt;
+	struct xrt_cu **xcus = cu_mgmt->xcus;
+	int num_cus = cu_mgmt->num_cus;
+	int busy_cnt = 0;
+	int loop_cnt = 0;
+	int cu_idx;
+
+	while (!kds->polling_stop) {
+		busy_cnt = 0;
+		for (cu_idx = 0; cu_idx < num_cus; cu_idx++) {
+			if (xrt_cu_process_queues(xcus[cu_idx]) == XCU_BUSY)
+				busy_cnt += 1;
+		}
+
+		/* If kds->interval is 0, keep poling CU without sleeping.
+		 * If kds->interval is greater than 0, this thread will sleep
+		 * interval to interval + 3 microseconds.
+		 */
+		if (kds->interval > 0)
+			usleep_range(kds->interval, kds->interval + 3);
+
+		/* Avoid large num_rq leads to more 120 sec blocking */
+		if (++loop_cnt == 8) {
+			loop_cnt = 0;
+			schedule();
+		}
+
+		if (busy_cnt != 0)
+			continue;
+
+		wait_event_interruptible(kds->wait_queue, kds_wake_up_poll(kds));
+	}
+
+	return 0;
+}
 
 /**
  * get_cu_by_addr -Get CU index by address
@@ -322,13 +375,17 @@ kds_cu_abort_cmd(struct kds_cu_mgmt *cu_mgmt, struct kds_command *xcmd)
 }
 
 static int
-kds_submit_cu(struct kds_cu_mgmt *cu_mgmt, struct kds_command *xcmd)
+kds_submit_cu(struct kds_sched *kds, struct kds_command *xcmd)
 {
 	int ret = 0;
 
 	switch (xcmd->opcode) {
 	case OP_START:
-		ret = kds_cu_dispatch(cu_mgmt, xcmd);
+		ret = kds_cu_dispatch(&kds->cu_mgmt, xcmd);
+		if (!ret && (kds->ert_disable || kds->xgq_enable)) {
+			kds->polling_start = 1;
+			wake_up_interruptible(&kds->wait_queue);
+		}
 		break;
 	case OP_CONFIG:
 		/* No need to config for KDS mode */
@@ -337,7 +394,7 @@ kds_submit_cu(struct kds_cu_mgmt *cu_mgmt, struct kds_command *xcmd)
 		xcmd->cb.free(xcmd);
 		break;
 	case OP_ABORT:
-		kds_cu_abort_cmd(cu_mgmt, xcmd);
+		kds_cu_abort_cmd(&kds->cu_mgmt, xcmd);
 		break;
 	default:
 		ret = -EINVAL;
@@ -554,12 +611,12 @@ kds_add_scu_context(struct kds_sched *kds, struct kds_client *client,
 	bool shared;
 	int ret = 0;
 
-        if (info->cu_idx < MAX_CUS) {
+	if (info->cu_idx < MAX_CUS) {
 		kds_err(client, "SCU cu_idx %d not valid.  SCU should start from %d", info->cu_idx, MAX_CUS);
 		return -EINVAL;
-        } else {
-                cu_idx = info->cu_idx - MAX_CUS;
-        }
+	} else {
+		cu_idx = info->cu_idx & ~(SCU_DOMAIN);
+	}
 
 	if (cu_idx >= scu_mgmt->num_cus) {
 		kds_err(client, "SCU(%d) not found", cu_idx);
@@ -613,12 +670,12 @@ kds_del_scu_context(struct kds_sched *kds, struct kds_client *client,
 	unsigned long submitted = 0;
 	unsigned long completed = 0;
 
-        if (info->cu_idx < MAX_CUS) {
+	if (info->cu_idx < MAX_CUS) {
 		kds_err(client, "SCU cu_idx %d not valid.  SCU should start from %d", info->cu_idx, MAX_CUS);
 		return -EINVAL;
-        } else {
-                cu_idx = info->cu_idx - MAX_CUS;
-        }
+	} else {
+		cu_idx = info->cu_idx & ~(SCU_DOMAIN);
+	}
 
 	if (cu_idx >= scu_mgmt->num_cus) {
 		kds_err(client, "SCU(%d) not found", cu_idx);
@@ -794,6 +851,7 @@ int kds_init_sched(struct kds_sched *kds)
 	kds->ert_disable = true;
 	kds->ini_disable = false;
 	init_completion(&kds->comp);
+	init_waitqueue_head(&kds->wait_queue);
 
 	return 0;
 }
@@ -821,12 +879,18 @@ struct kds_command *kds_alloc_command(struct kds_client *client, u32 size)
 	xcmd->status = KDS_NEW;
 	xcmd->timestamp_enabled = 0;
 
+	if (size == 0)
+		goto done;
+
 	xcmd->info = kzalloc(size, GFP_KERNEL);
 	if (!xcmd->info) {
 		kfree(xcmd);
 		return NULL;
 	}
+	xcmd->isize = size;
+	xcmd->payload_alloc = 1;
 
+done:
 	return xcmd;
 }
 
@@ -835,7 +899,8 @@ void kds_free_command(struct kds_command *xcmd)
 	if (!xcmd)
 		return;
 
-	kfree(xcmd->info);
+	if (xcmd->payload_alloc)
+		kfree(xcmd->info);
 	kfree(xcmd);
 }
 
@@ -852,7 +917,7 @@ int kds_add_command(struct kds_sched *kds, struct kds_command *xcmd)
 	/* Command is good to submit */
 	switch (xcmd->type) {
 	case KDS_CU:
-		err = kds_submit_cu(&kds->cu_mgmt, xcmd);
+		err = kds_submit_cu(kds, xcmd);
 		break;
 	case KDS_ERT:
 		err = kds_submit_ert(kds, xcmd);
@@ -1092,7 +1157,6 @@ static inline void
 insert_cu(struct kds_cu_mgmt *cu_mgmt, int i, struct xrt_cu *xcu)
 {
 	cu_mgmt->xcus[i] = xcu;
-	xcu->info.cu_idx = i;
 	/* m2m cu */
 	if (xcu->info.intr_id == M2M_CU_ID)
 		cu_mgmt->num_cdma++;
@@ -1101,91 +1165,32 @@ insert_cu(struct kds_cu_mgmt *cu_mgmt, int i, struct xrt_cu *xcu)
 int kds_add_cu(struct kds_sched *kds, struct xrt_cu *xcu)
 {
 	struct kds_cu_mgmt *cu_mgmt = &kds->cu_mgmt;
-	struct xrt_cu *prev_cu;
-	int i;
 
-	if (cu_mgmt->num_cus >= MAX_CUS)
-		return -ENOMEM;
+	if (xcu->info.cu_idx >= MAX_CUS)
+		return -EINVAL;
 
-	/* Determin CUs ordering:
-	 * Sort CU in interrupt ID increase order.
-	 * If interrupt ID is the same, sort CU in address
-	 * increase order.
-	 * This strategy is good for both legacy xclbin and latest xclbin.
-	 *
-	 * - For legacy xclbin, all of the interrupt IDs are 0. The
-	 * interrupt is wiring by CU address increase order.
-	 * - For latest xclbin, the interrupt ID is from 0 ~ 127.
-	 *   -- One exception is if only 1 CU, the interrupt ID would be 1.
-	 *
-	 * Do NOT add code in KDS to check if xclbin is legacy. We don't
-	 * want to coupling KDS and xclbin parsing.
-	 */
-	if (cu_mgmt->num_cus == 0) {
-		insert_cu(cu_mgmt, 0, xcu);
-		++cu_mgmt->num_cus;
-		return 0;
-	}
+	insert_cu(cu_mgmt, xcu->info.cu_idx, xcu);
+	cu_mgmt->num_cus++;
 
-	/* Insertion sort */
-	for (i = cu_mgmt->num_cus; i > 0; i--) {
-		prev_cu = cu_mgmt->xcus[i-1];
-		if (prev_cu->info.intr_id < xcu->info.intr_id) {
-			insert_cu(cu_mgmt, i, xcu);
-			++cu_mgmt->num_cus;
-			return 0;
-		} else if (prev_cu->info.intr_id > xcu->info.intr_id) {
-			insert_cu(cu_mgmt, i, prev_cu);
-			continue;
-		}
-
-		// Same intr ID.
-		if (prev_cu->info.addr < xcu->info.addr) {
-			insert_cu(cu_mgmt, i, xcu);
-			++cu_mgmt->num_cus;
-			return 0;
-		} else if (prev_cu->info.addr > xcu->info.addr) {
-			insert_cu(cu_mgmt, i, prev_cu);
-			continue;
-		}
-
-		/* Same CU address? Something wrong */
-		break;
-	}
-
-	if (i == 0) {
-		insert_cu(cu_mgmt, 0, xcu);
-		++cu_mgmt->num_cus;
-		return 0;
-	}
-
-	return -ENOSPC;
+	return 0;
 }
 
 int kds_del_cu(struct kds_sched *kds, struct xrt_cu *xcu)
 {
 	struct kds_cu_mgmt *cu_mgmt = &kds->cu_mgmt;
-	int i;
 
 	if (cu_mgmt->num_cus == 0)
 		return -EINVAL;
 
-	for (i = 0; i < MAX_CUS; i++) {
-		if (cu_mgmt->xcus[i] != xcu)
-			continue;
+	--cu_mgmt->num_cus;
+	cu_mgmt->xcus[xcu->info.cu_idx] = NULL;
+	cu_stat_write(cu_mgmt, usage[xcu->info.cu_idx], 0);
 
-		--cu_mgmt->num_cus;
-		cu_mgmt->xcus[i] = NULL;
-		cu_stat_write(cu_mgmt, usage[i], 0);
+	/* m2m cu */
+	if (xcu->info.intr_id == M2M_CU_ID)
+		cu_mgmt->num_cdma--;
 
-		/* m2m cu */
-		if (xcu->info.intr_id == M2M_CU_ID)
-			cu_mgmt->num_cdma--;
-
-		return 0;
-	}
-
-	return -ENODEV;
+	return 0;
 }
 
 int kds_add_scu(struct kds_sched *kds, struct xrt_cu *xcu)
@@ -1302,14 +1307,25 @@ int kds_init_ert(struct kds_sched *kds, struct kds_ert *ert)
 
 int kds_fini_ert(struct kds_sched *kds)
 {
+	kds->ert_disable = true;
+	kds->ert = NULL;
 	return 0;
 }
 
 void kds_reset(struct kds_sched *kds)
 {
 	kds->bad_state = 0;
-	kds->ert_disable = true;
 	kds->ini_disable = false;
+
+	if (!kds->ert)
+		kds->ert_disable = true;
+
+	if (kds->polling_thread && !IS_ERR(kds->polling_thread)) {
+		kds->polling_stop = 1;
+		wake_up_interruptible(&kds->wait_queue);
+		(void) kthread_stop(kds->polling_thread);
+		kds->polling_thread = NULL;
+	}
 }
 
 static int kds_fa_assign_cmdmem(struct kds_sched *kds)
@@ -1396,6 +1412,16 @@ int kds_cfg_update(struct kds_sched *kds)
 		}
 	}
 
+	if (!kds->cu_intr) {
+		BUG_ON(kds->polling_thread);
+		kds->polling_stop = 0;
+		kds->polling_thread = kthread_run(kds_polling_thread, kds, "kds_poll");
+		if (IS_ERR(kds->polling_thread)) {
+			ret = IS_ERR(kds->polling_thread);
+			kds->polling_thread = NULL;
+		}
+	}
+
 	return ret;
 }
 
@@ -1467,6 +1493,108 @@ u32 kds_live_clients_nolock(struct kds_sched *kds, pid_t **plist)
 	*plist = pl;
 out:
 	return count;
+}
+
+/*
+ * This function would parse ip_layout and return a sorted CU info array.
+ * But ip_layout only provides a portion of CU info. The caller would need to
+ * fetch and fill the missing info.
+ *
+ * This function determines CU indexing for all supported platforms.
+ */
+int kds_ip_layout2cu_info(struct ip_layout *ip_layout, struct xrt_cu_info cu_info[], int num_info)
+{
+	struct xrt_cu_info info = {0};
+	struct ip_data *ip;
+	char kname[64] = {0};
+	char *kname_p = NULL;
+	int num_cus = 0;
+	int i = 0, j = 0;
+
+	for(i = 0; i < ip_layout->m_count; ++i) {
+		ip = &ip_layout->m_ip_data[i];
+
+		if (ip->m_type != IP_KERNEL)
+			continue;
+
+		if ((~ip->m_base_address) == 0)
+			continue;
+
+		memset(&info, 0, sizeof(info));
+
+		/* ip_data->m_name format "<kernel name>:<instance name>",
+		 * where instance name is so called CU name.
+		 */
+		strncpy(kname, ip->m_name, sizeof(kname));
+		kname[sizeof(kname)-1] = '\0';
+		kname_p = &kname[0];
+		strncpy(info.kname, strsep(&kname_p, ":"), sizeof(info.kname));
+		info.kname[sizeof(info.kname)-1] = '\0';
+		strncpy(info.iname, strsep(&kname_p, ":"), sizeof(info.iname));
+		info.iname[sizeof(info.kname)-1] = '\0';
+
+		info.addr = ip->m_base_address;
+		info.intr_enable = ip->properties & IP_INT_ENABLE_MASK;
+		info.protocol = (ip->properties & IP_CONTROL_MASK) >> IP_CONTROL_SHIFT;
+		info.intr_id = (ip->properties & IP_INTERRUPT_ID_MASK) >> IP_INTERRUPT_ID_SHIFT;
+
+		/* Rules to determine CUs ordering:
+		 * Sort CU in interrupt ID increase order.
+		 * If interrupt ID is the same, sort CU in address increase order.
+		 * This strategy is good for both legacy xclbin and latest xclbin.
+		 *
+		 * - For legacy xclbin, all of the interrupt IDs are 0. The
+		 * interrupt is wiring by CU address increase order.
+		 * - For latest xclbin, the interrupt ID is from 0 ~ 127.
+		 *   -- One exception is if only 1 CU, the interrupt ID would be 1.
+		 *
+		 * With below insertion sort algorithm, we don't need to check
+		 * if xclbin is legacy or latest.
+		 */
+
+		/* Insertion sort */
+		for (j = num_cus; j >= 0; j--) {
+			struct xrt_cu_info *prev_info;
+
+			if (j == 0) {
+				memcpy(&cu_info[j], &info, sizeof(info));
+				cu_info[j].cu_idx = j;
+				num_cus++;
+				break;
+			}
+
+			prev_info = &cu_info[j-1];
+			if (prev_info->intr_id < info.intr_id) {
+				memcpy(&cu_info[j], &info, sizeof(info));
+				cu_info[j].cu_idx = j;
+				num_cus++;
+				break;
+			} else if (prev_info->intr_id > info.intr_id) {
+				memcpy(&cu_info[j], prev_info, sizeof(info));
+				cu_info[j].cu_idx = j;
+				continue;
+			}
+
+			/* Same interrupt ID case. Sorted by address */
+			if (prev_info->addr < info.addr) {
+				memcpy(&cu_info[j], &info, sizeof(info));
+				cu_info[j].cu_idx = j;
+				num_cus++;
+				break;
+			} else if (prev_info->addr > info.addr) {
+				memcpy(&cu_info[j], prev_info, sizeof(info));
+				cu_info[j].cu_idx = j;
+				continue;
+			}
+			/*
+			 * Same CU address? Something wrong in the ip_layout.
+			 * But I will just ignore this IP and not error out.
+			 */
+			break;
+		}
+	}
+
+	return num_cus;
 }
 
 /* User space execbuf command related functions below */
@@ -1647,3 +1775,4 @@ cu_mask_to_cu_idx(struct kds_command *xcmd, uint8_t *cus)
 
 	return num_cu;
 }
+

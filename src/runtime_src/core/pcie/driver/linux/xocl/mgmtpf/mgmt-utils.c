@@ -290,7 +290,7 @@ long xclmgmt_hot_reset(struct xclmgmt_dev *lro, bool force)
 		mgmt_err(lro, "Unable to identify device root port for card %d",
 		       lro->instance);
 		err = -ENODEV;
-		goto done;
+		goto failed;
 	}
 
 	ep_name = pdev->bus->name;
@@ -298,11 +298,22 @@ long xclmgmt_hot_reset(struct xclmgmt_dev *lro, bool force)
 		lro->instance, ep_name,
 		PCI_SLOT(pdev->devfn), PCI_FUNC(pdev->devfn));
 
+	/*
+	 * reset multi-boot config for next boot.
+	 * This is needed to make sure next boot will be based on pre-loaded
+	 *    boot configuration.
+	 */
+	err = xocl_vmr_enable_multiboot(lro);
+	if (err && err != -ENODEV) {
+		mgmt_info(lro, "reset multi-boot config failed. err: %ld", err);
+		goto failed;
+	}
+
 	if (!force && xrt_reset_syncup) {
 		mgmt_info(lro, "wait for master off for all functions");
 		err = xocl_wait_master_off(lro);
 		if (err)
-			goto done;
+			goto failed;
 	}
 
 	xocl_thread_stop(lro);
@@ -378,7 +389,11 @@ long xclmgmt_hot_reset(struct xclmgmt_dev *lro, bool force)
 	else if (!force)
 		xclmgmt_connect_notify(lro, true);
 
-done:
+	(void) xocl_reinit_vmr(lro);
+
+	return 0;
+
+failed:
 	return err;
 }
 
@@ -538,6 +553,7 @@ done:
 static void xclmgmt_reset_pci(struct xclmgmt_dev *lro)
 {
 	struct pci_dev *pdev = lro->pci_dev;
+	u16 slot_ctrl_orig = 0, slot_ctrl;
 	struct pci_bus *bus;
 	u8 pci_bctl;
 	u16 pci_cmd, devctl;
@@ -552,6 +568,12 @@ static void xclmgmt_reset_pci(struct xclmgmt_dev *lro)
 	/* Reset secondary bus. */
 	bus = pdev->bus;
 
+	pcie_capability_read_word(bus->self, PCI_EXP_SLTCTL, &slot_ctrl);
+	if (slot_ctrl != (u16) ~0) {
+		slot_ctrl_orig = slot_ctrl;
+		slot_ctrl &= ~(PCI_EXP_SLTCTL_HPIE);
+		pcie_capability_write_word(bus->self, PCI_EXP_SLTCTL, slot_ctrl);
+	}
 	/*
 	 * When flipping the SBR bit, device can fall off the bus. This is usually
 	 * no problem at all so long as drivers are working properly after SBR.
@@ -571,6 +593,9 @@ static void xclmgmt_reset_pci(struct xclmgmt_dev *lro)
 	pci_read_config_byte(bus->self, PCI_BRIDGE_CONTROL, &pci_bctl);
 	pci_bctl |= PCI_BRIDGE_CTL_BUS_RESET;
 	pci_write_config_byte(bus->self, PCI_BRIDGE_CONTROL, pci_bctl);
+
+	if (!slot_ctrl_orig)
+		pcie_capability_write_word(bus->self, PCI_EXP_SLTCTL, slot_ctrl_orig);
 
 	msleep(100);
 	pci_bctl &= ~PCI_BRIDGE_CTL_BUS_RESET;

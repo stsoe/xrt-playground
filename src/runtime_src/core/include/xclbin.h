@@ -185,7 +185,8 @@ extern "C" {
         MEM_BRAM,
         MEM_URAM,
         MEM_STREAMING_CONNECTION,
-        MEM_HOST
+        MEM_HOST,
+        MEM_PS_KERNEL,
     };
 
     enum IP_TYPE {
@@ -196,6 +197,7 @@ extern "C" {
         IP_MEM_DDR4,
         IP_MEM_HBM,
         IP_MEM_HBM_ECC,
+        IP_PS_KERNEL,
     };
 
     enum ACTION_MASK {

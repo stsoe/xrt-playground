@@ -64,6 +64,12 @@ struct ishim
   virtual xclBufferHandle
   import_bo(xclBufferExportHandle ehdl) = 0;
 
+  // Import an exported BO from another process identified by argument pid.
+  // This function is only supported on systems with pidfd kernel support
+  virtual xclBufferHandle
+  import_bo(pid_t, xclBufferExportHandle)
+  { throw xrt_core::error(std::errc::not_supported,"import_bo(pid, hdl)"); }
+
   virtual void
   copy_bo(xclBufferHandle dst, xclBufferHandle src, size_t size, size_t dst_offset, size_t src_offset) = 0;
 
@@ -86,10 +92,10 @@ struct ishim
   reg_write(uint32_t ipidx, uint32_t offset, uint32_t data) = 0;
 
   virtual void
-  xread(uint64_t offset, void* buffer, size_t size) const = 0;
+  xread(enum xclAddressSpace addr_space, uint64_t offset, void* buffer, size_t size) const = 0;
 
   virtual void
-  xwrite(uint64_t offset, const void* buffer, size_t size) = 0;
+  xwrite(enum xclAddressSpace addr_space, uint64_t offset, const void* buffer, size_t size) = 0;
 
   virtual void
   unmgd_pread(void* buffer, size_t size, uint64_t offset) = 0;
@@ -347,16 +353,16 @@ struct shim : public DeviceType
 # pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #endif
   virtual void
-  xread(uint64_t offset, void* buffer, size_t size) const
+  xread(enum xclAddressSpace addr_space, uint64_t offset, void* buffer, size_t size) const
   {
-    if (size != xclRead(DeviceType::get_device_handle(), XCL_ADDR_KERNEL_CTRL, offset, buffer, size))
+    if (size != xclRead(DeviceType::get_device_handle(), addr_space, offset, buffer, size))
       throw system_error(-1, "failed to read at address (" + std::to_string(offset) + ")");
   }
 
   virtual void
-  xwrite(uint64_t offset, const void* buffer, size_t size)
+  xwrite(enum xclAddressSpace addr_space, uint64_t offset, const void* buffer, size_t size)
   {
-    if (size != xclWrite(DeviceType::get_device_handle(), XCL_ADDR_KERNEL_CTRL, offset, buffer, size))
+    if (size != xclWrite(DeviceType::get_device_handle(), addr_space, offset, buffer, size))
       throw system_error(-1, "failed to write to address (" + std::to_string(offset) + ")");
   }
 #ifdef __GNUC__

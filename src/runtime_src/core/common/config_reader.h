@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2016-2020 Xilinx, Inc
+ * Copyright (C) 2016-2021 Xilinx, Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -101,13 +101,6 @@ set(const std::string& key, const std::string& value);
  * file
  */
 inline bool
-get_debug()
-{
-  static bool value  = detail::get_bool_value("Debug.debug",false);
-  return value;
-}
-
-inline bool
 get_app_debug()
 {
   static bool value  = detail::get_bool_value("Debug.app_debug",false);
@@ -157,6 +150,24 @@ get_data_transfer_trace()
 }
 
 inline std::string
+get_data_transfer_trace_dep_message()
+{
+  static bool emitted = false ;
+  if (!emitted) {
+    emitted = true ;
+    return "The xrt.ini flag \"data_transfer_trace\" is deprecated and will be removed in a future release.  Please use the equivalent flag \"device_trace.\"" ;
+  }
+  return "" ;
+}
+
+inline std::string
+get_device_trace()
+{
+  static std::string value = detail::get_string_value("Debug.device_trace", "off");
+  return value;
+}
+
+inline std::string
 get_profiling_directory()
 {
   static std::string value = detail::get_string_value("Debug.profiling_directory", "") ;
@@ -194,6 +205,21 @@ get_aie_profile_interval_us()
 }
 
 inline bool
+get_aie_status()
+{
+  static bool value = detail::get_bool_value("Debug.aie_status", false);
+  return value;
+}
+
+inline unsigned int
+get_aie_status_interval_us()
+{
+  // NOLINTNEXTLINE
+  static unsigned int value = detail::get_uint_value("Debug.aie_status_interval_us", 1000);
+  return value;
+}
+
+inline bool
 get_noc_profile()
 {
   static bool value = detail::get_bool_value("Debug.noc_profile",false);
@@ -211,15 +237,11 @@ get_noc_profile_interval_ms()
 inline std::string
 get_stall_trace()
 {
-  static std::string data_transfer_enabled = get_data_transfer_trace();
-  static std::string value = (!get_profile() && (0 == data_transfer_enabled.compare("off")) ) ? "off" : detail::get_string_value("Debug.stall_trace","off");
-  return value;
-}
-
-inline bool
-get_timeline_trace()
-{
-  static bool value = detail::get_bool_value("Debug.timeline_trace",false);
+  static bool data_transfer_enabled =
+    (get_data_transfer_trace() != "off") || (get_device_trace() != "off") ;
+  static std::string value =
+    (!data_transfer_enabled) ? "off" :
+    detail::get_string_value("Debug.stall_trace", "off");
   return value;
 }
 
@@ -227,14 +249,6 @@ inline bool
 get_continuous_trace()
 {
   static bool value = detail::get_bool_value("Debug.continuous_trace",false);
-  return value;
-}
-
-inline unsigned int
-get_continuous_trace_interval_ms()
-{
-  // NOLINTNEXTLINE
-  static unsigned int value = detail::get_uint_value("Debug.continuous_trace_interval_ms",10);
   return value;
 }
 
@@ -283,13 +297,6 @@ get_xrt_trace()
 }
 
 inline bool
-get_xrt_profile()
-{
-  static bool value = detail::get_bool_value("Debug.xrt_profile", false);
-  return value;
-}
-
-inline bool
 get_native_xrt_trace()
 {
   static bool value = detail::get_bool_value("Debug.native_xrt_trace", false);
@@ -313,7 +320,14 @@ get_opencl_summary()
 inline bool
 get_opencl_device_counter()
 {
-  static bool value = (get_profile()) ? true : detail::get_bool_value("Debug.opencl_device_counter", false);
+  static bool value = detail::get_bool_value("Debug.opencl_device_counter", false);
+  return value;
+}
+
+inline bool
+get_device_counters()
+{
+  static bool value = detail::get_bool_value("Debug.device_counters", false);
   return value;
 }
 
@@ -346,9 +360,30 @@ get_aie_profile_core_metrics()
 }
 
 inline std::string
+get_aie_trace_start_delay()
+{
+  static std::string value = detail::get_string_value("Debug.aie_trace_start_delay", "0");
+  return value;
+}
+
+inline bool
+get_aie_trace_user_control()
+{
+  static bool value = detail::get_bool_value("Debug.aie_trace_user_control", false);
+  return value;
+}
+
+inline std::string
 get_aie_profile_memory_metrics()
 {
   static std::string value = detail::get_string_value("Debug.aie_profile_memory_metrics", "conflicts");
+  return value;
+}
+
+inline std::string
+get_aie_profile_shim_metrics()
+{
+  static std::string value = detail::get_string_value("Debug.aie_profile_shim_metrics", "bandwidths");
   return value;
 }
 
@@ -363,6 +398,13 @@ inline bool
 get_vitis_ai_profile()
 {
   static bool value = detail::get_bool_value("Debug.vitis_ai_profile", false);
+  return value;
+}
+
+inline bool
+get_pl_deadlock_detection()
+{
+  static bool value = detail::get_bool_value("Debug.pl_deadlock_detection", false);
   return value;
 }
 

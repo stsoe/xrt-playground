@@ -21,7 +21,7 @@ jobs:
 
     - name: Create clang-tidy review
       id: review
-      uses: stsoe/clang-tidy-review@exclude_files
+      uses: stsoe/clang-tidy-review@patches
       with:
         build_dir: build/Release
         apt_packages: |
@@ -43,5 +43,5 @@ jobs:
         split_workflow: true
 
     - name: Upload clang-tidy review
-      uses: stsoe/clang-tidy-review/upload@exclude_files
+      uses: stsoe/clang-tidy-review/upload@patches
       id: upload-review

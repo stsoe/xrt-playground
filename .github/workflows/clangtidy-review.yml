@@ -4,8 +4,8 @@ name: clang-tidy-review
 
 on:
   pull_request:
-    types: [opened, synchronize]
-    branches: main-ge
+    types: [opened, synchronize, reopened]
+    branches: main
     
   workflow_dispatch:
 

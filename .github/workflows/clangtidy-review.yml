@@ -21,7 +21,7 @@ jobs:
 
     - name: Create clang-tidy review
       id: review
-      uses: stsoe/clang-tidy-review@exclude-files
+      uses: stsoe/clang-tidy-review@exclude_files
       with:
         build_dir: build/Release
         apt_packages: |

@@ -27,26 +27,22 @@
 static std::fstream sysfs_open_path(const std::string& path, std::string& err,
     bool write, bool binary)
 {
+  std::fstream fs;
   std::ios::openmode mode = write ? std::ios::out : std::ios::in;
 
   if (binary)
     mode |= std::ios::binary;
 
   err.clear();
-  std::fstream fs{path, mode};
-
-  if (fs.is_open())
-    return fs;
-
-  std::stringstream ss;
-  ss << "Failed to open " << path << " for "
-     << (binary ? "binary " : "")
-     << (write ? "writing" : "reading") << ": "
-     << strerror(errno) << std::endl;
-  err = ss.str();
-
-  int i = 10;
-
+  fs.open(path, mode);
+  if (!fs.is_open()) {
+    std::stringstream ss;
+    ss << "Failed to open " << path << " for "
+       << (binary ? "binary " : "")
+       << (write ? "writing" : "reading") << ": "
+       << strerror(errno) << std::endl;
+    err = ss.str();
+  }
   return fs;
 }
 
